@@ -148,9 +148,6 @@ public class CompressedImageTiler implements ImageTiler {
         final int n = imageDimensions.length;
         final int[] posits = new int[n];
 
-        // This is the step value for this segment (current row)
-        final int segmentStepValue = steps[n - 1];
-
         final int segment = lengths[n - 1];
 
         // The primitive base class of this image's data.
@@ -167,47 +164,63 @@ public class CompressedImageTiler implements ImageTiler {
             boolean validSegment = CompressedImageTiler.isValidSegment(posits[mx], lengths[mx], imageDimensions[mx]);
 
             if (validSegment) {
-                int stepOffset = 0;
-                int pixelsRead = 0;
-                final int[] tileRowPositions = new int[n];
-                System.arraycopy(posits, 0, tileRowPositions, 0, n);
-                while (pixelsRead < segment) {
-                    final int[] tileOffsets = getTileOffsets(tileRowPositions, tileDimensions);
-                    // Multidimensional array
-                    final Object tileData = getDecompressedTileData(tileRowPositions, tileDimensions);
-                    final StandardImageTiler standardImageTiler = new StandardImageTiler(null, -1,
-                                                                                         tileDimensions, base) {
-                        @Override
-                        protected Object getMemoryImage() {
-                            return tileData;
-                        }
-                    };
-                    final int remaining = segment - pixelsRead;
+                final int[] rowOfTileDimensions = new int[n];
+                System.arraycopy(tileDimensions, 0, rowOfTileDimensions, 0, n - 1);
+                rowOfTileDimensions[mx] = segment;
 
-                    // Apply any remaining steps that didn't get read from the last tile.
-                    tileOffsets[mx] += stepOffset;
-                    final int segmentLength = Math.min(segment, tileDimensions[mx] - tileOffsets[mx]);
-                    final int tileReadLength = Math.max(1, Math.min(remaining, segmentLength));
+                final int[] rowOfTileLengths = new int[n];
+                System.arraycopy(tileDimensions, 0, rowOfTileLengths, 0, n - 1);
+                rowOfTileLengths[mx] = segment;
 
-                    final int[] tileReadLengths = new int[tileDimensions.length];
-                    Arrays.fill(tileReadLengths, 1);
-                    tileReadLengths[tileReadLengths.length - 1] = tileReadLength;
+                final Object rowOfTilesArray = ArrayFuncs.newInstance(base, rowOfTileDimensions);
+                final Object rowOfTiles = decompressRowOfTiles(rowOfTilesArray, tileDimensions, posits, segment, mx);
 
-                    final int[] tileSteps = new int[tileDimensions.length];
-                    Arrays.fill(tileSteps, 1);
-                    tileSteps[tileSteps.length - 1] = segmentStepValue;
-
-                    // Slice out a 1-dimensional array as we're reading Pixels row by row.
-                    standardImageTiler.getTile(output, tileOffsets, tileReadLengths, tileSteps);
-                    final int unreadSteps = tileReadLength % segmentStepValue;
-
-                    stepOffset = (unreadSteps > 0) ? segmentStepValue - unreadSteps : 0;
-                    pixelsRead += tileReadLength;
-                    tileRowPositions[mx] = tileRowPositions[mx] + tileReadLength;
-                }
+                final StandardImageTiler standardImageTiler = new StandardImageTiler(null, -1,
+                                                                                     tileDimensions, base) {
+                    @Override
+                    protected Object getMemoryImage() {
+                        return rowOfTiles;
+                    }
+                };
+                standardImageTiler.getTile(output, getTileOffsets(posits, tileDimensions), rowOfTileLengths,
+                                           steps);
             }
         } while (CompressedImageTiler.incrementPosition(corners, posits, lengths, steps));
         output.flush();
+    }
+
+    private Object decompressRowOfTiles(final Object currRowArray, final int[] tileDimensions,
+                                        final int[] tileRowPositions, final int segment, final int axis)
+            throws FitsException {
+        int pixelsRead = 0;
+        final int[] currTileRowPositions = new int[tileRowPositions.length];
+        System.arraycopy(tileRowPositions, 0, currTileRowPositions, 0, tileRowPositions.length);
+
+        Object newOutputArray = currRowArray;
+
+        while (pixelsRead < segment) {
+            final int[] tileOffsets = getTileOffsets(currTileRowPositions, tileDimensions);
+
+            // Multidimensional array
+            final Object tileData = getDecompressedTileData(currTileRowPositions, tileDimensions);
+            final int[] currDimensions = ArrayFuncs.getDimensions(newOutputArray);
+            for (int i = 0; i < currDimensions.length; i++) {
+                final int tileAxisLength = tileDimensions[i];
+                currDimensions[i] += tileAxisLength;
+            }
+
+            newOutputArray = ArrayFuncs.newInstance(getBaseType().primitiveClass(), currDimensions);
+            ArrayFuncs.copyInto(tileData, newOutputArray);
+
+            final int remaining = segment - pixelsRead;
+            final int segmentLength = Math.min(segment, tileDimensions[axis] - tileOffsets[axis]);
+            final int tileReadLength = Math.max(1, Math.min(remaining, segmentLength));
+
+            pixelsRead += tileReadLength;
+            currTileRowPositions[axis] = currTileRowPositions[axis] + tileReadLength;
+        }
+
+        return newOutputArray;
     }
 
     /**
