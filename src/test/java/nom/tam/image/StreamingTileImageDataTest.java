@@ -191,6 +191,57 @@ public class StreamingTileImageDataTest {
     }
 
     @Test
+    public void testWriteNegativeStep() throws Exception {
+        final int axis1 = 200;
+        final int axis2 = 200;
+        final Random random = new Random();
+        final int[][] testData = new int[axis1][axis2];
+        for (int x = 0; x < axis1; x++) {
+            for (int y = 0; y < axis2; y++) {
+                testData[x][y] = random.nextInt() * x + y;
+            }
+        }
+
+        // Setup
+        final File fitsFile = File.createTempFile(StreamingTileImageData.class.getName(), ".fits");
+        final File outputFitsFile = File.createTempFile(StreamingTileImageData.class.getName(),
+                                                        "-reverse-cutout.fits");
+        System.out.println("Writing step cutout out to FITS file " + outputFitsFile.getAbsolutePath());
+
+        final ImageData sourceImageData = new ImageData(testData);
+        final Header sourceHeader = ImageHDU.manufactureHeader(sourceImageData);
+        try (final Fits sourceFits = new Fits()) {
+            final BasicHDU<?> hdu = FitsFactory.hduFactory(sourceHeader, sourceImageData);
+            sourceFits.addHDU(hdu);
+            sourceFits.write(fitsFile);
+        }
+
+        try (final Fits sourceFits = new Fits(fitsFile); final Fits outputFits = new Fits()) {
+            final ImageHDU imageHDU = (ImageHDU) sourceFits.getHDU(0);
+
+            final Header tileHeader = imageHDU.getHeader();
+            final int[] tileStarts = new int[] {4, 15};
+            final int[] tileLengths = new int[] {10, -10};
+            final int[] tileSteps = new int[] {1, 1};
+
+            tileHeader.setNaxis(1, Math.abs(tileLengths[0]) / Math.abs(tileSteps[0]));
+            tileHeader.setNaxis(2, Math.abs(tileLengths[1]) / Math.abs(tileSteps[1]));
+
+            final StreamingTileImageData streamingTileImageData =
+                    new StreamingTileImageData(tileHeader, imageHDU.getTiler(), tileStarts, tileLengths, tileSteps);
+            outputFits.addHDU(FitsFactory.hduFactory(tileHeader, streamingTileImageData));
+            outputFits.write(outputFitsFile);
+        }
+
+        try (final Fits outputFits = new Fits(outputFitsFile)) {
+            final ImageHDU cutoutImageHDU = (ImageHDU) outputFits.readHDU();
+            Assert.assertArrayEquals("Wrong dimensions.", new int[] {10, 10}, cutoutImageHDU.getAxes());
+            Assert.assertArrayEquals("Wrong calculated dimensions.", new int[] {10, 10},
+                                     ArrayFuncs.getDimensions(cutoutImageHDU.getData().getData()));
+        }
+    }
+
+    @Test
     public void testWrite() throws Exception {
         final int axis1 = 200;
         final int axis2 = 200;
