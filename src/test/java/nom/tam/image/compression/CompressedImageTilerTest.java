@@ -370,8 +370,8 @@ public class CompressedImageTilerTest {
             final Header header = imageHDU.getHeader();
             header.setSimple(true);
             header.setNaxes(2);
-            header.setNaxis(1, lengths[0]);
-            header.setNaxis(2, lengths[1]);
+            header.setNaxis(1, lengths[1]);
+            header.setNaxis(2, lengths[0]);
             header.findCard("CRPIX1").setValue(51.5D);
             header.findCard("CRPIX2").setValue(51.5D);
             header.deleteKey("CHECKSUM");

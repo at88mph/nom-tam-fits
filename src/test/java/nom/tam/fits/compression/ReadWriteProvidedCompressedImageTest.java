@@ -36,6 +36,7 @@ import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -83,6 +84,7 @@ import nom.tam.fits.header.Standard;
 import nom.tam.fits.util.BlackBoxImages;
 import nom.tam.image.StandardImageTiler;
 import nom.tam.image.compression.hdu.CompressedImageHDU;
+import nom.tam.util.ArrayDataOutput;
 import nom.tam.util.ArrayFuncs;
 import nom.tam.util.FitsOutputStream;
 import nom.tam.util.SafeClose;
@@ -1124,46 +1126,123 @@ public class ReadWriteProvidedCompressedImageTest {
     public void testCutout() throws Exception {
         final File tempFile = File.createTempFile("temp", ".fits");
         // This is a larger (356MB) file.  Don't read it in entirely.
-        final Path filePath = Path.of(resolveLocalOrRemoteFileName("1030185p.fits.fz"));
-
-        System.out.println("Output File: " + tempFile.getAbsolutePath());
-        System.out.println("Input File: " + filePath.toAbsolutePath());
+        final Path filePath = Path.of(resolveLocalOrRemoteFileName("cfht-megacam-1022459p.fits.fz"));
+        final int[] corners9 = new int[] {1, 668};
+        final int[] lengths9 = new int[] {464, 1740-668};
+        byte[] expectedCutout9;
 
         try (final FitsInputStream fitsInputStream = new FitsInputStream(new FileInputStream(filePath.toFile()));
              final Fits fits = new Fits(fitsInputStream);
              final Fits fitsOutput = new Fits(tempFile);
              final FitsOutputStream fitsOutputStream = new FitsOutputStream(new FileOutputStream(tempFile))) {
 
-            System.out.println("Starting read at HDU 8");
-            final BasicHDU<?> hdu8 = fits.getHDU(8);
-            System.out.println("Starting read at HDU 8: OK");
-            Assertions.assertInstanceOf(CompressedImageHDU.class, hdu8, "Incorrect type of HDU at index 8");
-            final CompressedImageHDU compressedImageHDU8 = (CompressedImageHDU) hdu8;
-            final Header header8 = ReadWriteProvidedCompressedImageTest.copyHeader(compressedImageHDU8.getHeader());
-            ReadWriteProvidedCompressedImageTest.adjustMEFHeader(header8,  false, 1);
-            ReadWriteProvidedCompressedImageTest.addCutoutFromCompressed(compressedImageHDU8, header8, fitsOutput,
-                    new int[]{1, 1}, new int[]{95, 104});
-
-            System.out.println("Starting read at HDU 9");
             final BasicHDU<?> hdu9 = fits.getHDU(9);
-            System.out.println("Starting read at HDU 9: OK");
             Assertions.assertInstanceOf(CompressedImageHDU.class, hdu9, "Incorrect type of HDU at index 9");
             final CompressedImageHDU compressedImageHDU9 = (CompressedImageHDU) hdu9;
+            expectedCutout9 = getCutoutBytes(compressedImageHDU9, corners9, lengths9);
             final Header header9 = ReadWriteProvidedCompressedImageTest.copyHeader(compressedImageHDU9.getHeader());
-            ReadWriteProvidedCompressedImageTest.adjustMEFHeader(header9,  true, 1);
+            ReadWriteProvidedCompressedImageTest.adjustMEFHeader(header9, false, 1);
             ReadWriteProvidedCompressedImageTest.addCutoutFromCompressed(compressedImageHDU9, header9, fitsOutput,
-                    new int[]{1115, 0}, new int[]{2112, 92});
+                    corners9, lengths9);
 
             fitsOutput.write(fitsOutputStream);
+        }
+
+        try {
+            assertWrittenCutoutMatches(tempFile, 0, expectedCutout9, lengths9);
+        } finally {
+            tempFile.delete();
         }
     }
 
     static void addCutoutFromCompressed(final CompressedImageHDU compressedImageHDU, final Header adjustedHeader,
-                                        final Fits fitsOutput, final int[] corners, final int[] lengths) {
+                                        final Fits fitsOutput, final int[] corners, final int[] lengths)
+            throws HeaderCardException {
+        ReadWriteProvidedCompressedImageTest.adjustCutoutHeader(adjustedHeader, lengths);
         final CompressedImageTiler compressedImageTiler = new CompressedImageTiler(compressedImageHDU);
-        final StreamingTileImageData streamingTileImageData8 = new StreamingTileImageData(adjustedHeader,
-                compressedImageTiler, corners, lengths, new int[]{1, 1});
-        fitsOutput.addHDU(new ImageHDU(adjustedHeader, streamingTileImageData8));
+        final StreamingTileImageData streamingTileImageData = new StreamingTileImageData(adjustedHeader,
+                compressedImageTiler, corners, lengths, new int[] {1, 1});
+        fitsOutput.addHDU(new ImageHDU(adjustedHeader, streamingTileImageData));
+    }
+
+    static void adjustCutoutHeader(final Header header, final int[] lengths) throws HeaderCardException {
+        if (header.containsKey(Compression.ZBITPIX.key())) {
+            header.setBitpix(header.getIntValue(Compression.ZBITPIX));
+        }
+        header.setNaxes(2);
+        // corners/lengths follow CompressedImageTiler image index order [NAXIS2, NAXIS1].
+        header.setNaxis(1, lengths[1]);
+        header.setNaxis(2, lengths[0]);
+        removeCompressedImageKeys(header);
+    }
+
+    private static byte[] getCutoutBytes(final CompressedImageHDU compressedImageHDU, final int[] corners,
+            final int[] lengths) throws FitsException, IOException {
+        final CompressedImageTiler tiler = new CompressedImageTiler(compressedImageHDU);
+        final ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        try (final ArrayDataOutput arrayDataOutput = new FitsOutputStream(byteArrayOutputStream)) {
+            tiler.getTile(arrayDataOutput, corners, lengths);
+            arrayDataOutput.flush();
+        }
+        return byteArrayOutputStream.toByteArray();
+    }
+
+    private static void assertWrittenCutoutMatches(final File outputFile, final int hduIndex, final byte[] expected,
+            final int[] lengths) throws Exception {
+        final int[] expectedAxes = new int[] {lengths[0], lengths[1]};
+        try (final Fits fits = new Fits(outputFile)) {
+            final ImageHDU imageHdu = (ImageHDU) fits.getHDU(hduIndex);
+            final Header header = imageHdu.getHeader();
+            Assertions.assertEquals(lengths[1], header.getIntValue(Standard.NAXISn.n(1)),
+                    "NAXIS1 at HDU " + hduIndex);
+            Assertions.assertEquals(lengths[0], header.getIntValue(Standard.NAXISn.n(2)),
+                    "NAXIS2 at HDU " + hduIndex);
+            Assertions.assertArrayEquals(expectedAxes, imageHdu.getAxes(),
+                    "cutout NAXIS dimensions at HDU " + hduIndex);
+            Assertions.assertArrayEquals(expectedAxes,
+                    ArrayFuncs.getDimensions(imageHdu.getData().getData()),
+                    "Java array dimensions at HDU " + hduIndex);
+            final short[][] data = (short[][]) imageHdu.getData().getData();
+            final ShortBuffer expectedPixels = java.nio.ByteBuffer.wrap(expected).asShortBuffer();
+            int index = 0;
+            for (int axis2 = 0; axis2 < lengths[0]; axis2++) {
+                for (int axis1 = 0; axis1 < lengths[1]; axis1++) {
+                    Assertions.assertEquals(expectedPixels.get(index), data[axis2][axis1],
+                            "pixel differed at cutout index " + index + " in HDU " + hduIndex);
+                    index++;
+                }
+            }
+        }
+    }
+
+    private static void removeCompressedImageKeys(final Header header) {
+        header.deleteKey(Compression.ZTABLE);
+        header.deleteKey(Compression.ZIMAGE);
+        header.deleteKey(Compression.ZCMPTYPE);
+        header.deleteKey(Compression.ZBITPIX);
+        header.deleteKey(Compression.ZNAXIS);
+        header.deleteKey(Compression.ZQUANTIZ);
+        header.deleteKey(Compression.ZMASKCMP);
+        header.deleteKey(Compression.ZSIMPLE);
+        header.deleteKey(Compression.ZTENSION);
+        header.deleteKey(Compression.ZEXTEND);
+        header.deleteKey(Compression.ZBLOCKED);
+        header.deleteKey(Compression.ZPCOUNT);
+        header.deleteKey(Compression.ZGCOUNT);
+        header.deleteKey(Compression.ZHECKSUM);
+        header.deleteKey(Compression.ZDATASUM);
+        header.deleteKey(Compression.ZDITHER0);
+        header.deleteKey(Compression.ZBLANK);
+        header.deleteKey(Compression.ZTHEAP);
+        header.deleteKey(Compression.ZTILELEN);
+        for (int n = 1; n <= 9; n++) {
+            header.deleteKey(Compression.ZNAXISn.n(n));
+            header.deleteKey(Compression.ZTILEn.n(n));
+            header.deleteKey(Compression.ZNAMEn.n(n));
+            header.deleteKey(Compression.ZVALn.n(n));
+            header.deleteKey(Compression.ZFORMn.n(n));
+            header.deleteKey(Compression.ZCTYPn.n(n));
+        }
     }
 
     static void adjustMEFHeader(final Header header, final boolean firstHDUAlreadyWritten,
