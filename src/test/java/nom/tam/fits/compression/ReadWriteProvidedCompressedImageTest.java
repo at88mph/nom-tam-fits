@@ -46,6 +46,8 @@ import java.io.InputStream;
 import java.lang.reflect.Array;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.nio.DoubleBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
@@ -1123,33 +1125,33 @@ public class ReadWriteProvidedCompressedImageTest {
     }
 
     @Test
-    public void testCutout() throws Exception {
+    public void writeCutoutFromCompressed() throws Exception {
         final File tempFile = File.createTempFile("temp", ".fits");
-        // This is a larger (356MB) file.  Don't read it in entirely.
-        final Path filePath = Path.of(resolveLocalOrRemoteFileName("cfht-megacam-1022459p.fits.fz"));
-        final int[] corners9 = new int[] {1, 668};
-        final int[] lengths9 = new int[] {464, 1740-668};
-        byte[] expectedCutout9;
+        // This is a larger (256MB) file.  Don't read it in entirely.
+        final Path filePath = Path.of(resolveLocalOrRemoteFileName("tu1134531.fits.fz"));
+        final int[] corners = new int[] {1, 230};
+        final int[] lengths = new int[] {464, 225};
+        byte[] expectedCutout;
 
         try (final FitsInputStream fitsInputStream = new FitsInputStream(new FileInputStream(filePath.toFile()));
              final Fits fits = new Fits(fitsInputStream);
              final Fits fitsOutput = new Fits(tempFile);
              final FitsOutputStream fitsOutputStream = new FitsOutputStream(new FileOutputStream(tempFile))) {
 
-            final BasicHDU<?> hdu9 = fits.getHDU(9);
-            Assertions.assertInstanceOf(CompressedImageHDU.class, hdu9, "Incorrect type of HDU at index 9");
-            final CompressedImageHDU compressedImageHDU9 = (CompressedImageHDU) hdu9;
-            expectedCutout9 = getCutoutBytes(compressedImageHDU9, corners9, lengths9);
-            final Header header9 = ReadWriteProvidedCompressedImageTest.copyHeader(compressedImageHDU9.getHeader());
-            ReadWriteProvidedCompressedImageTest.adjustMEFHeader(header9, false, 1);
-            ReadWriteProvidedCompressedImageTest.addCutoutFromCompressed(compressedImageHDU9, header9, fitsOutput,
-                    corners9, lengths9);
+            final BasicHDU<?> hdu = fits.getHDU(5);
+            Assertions.assertInstanceOf(CompressedImageHDU.class, hdu, "Incorrect type of HDU at index 5");
+            final CompressedImageHDU compressedImageHDU = (CompressedImageHDU) hdu;
+            expectedCutout = getCutoutBytes(compressedImageHDU, corners, lengths);
+            final Header header = ReadWriteProvidedCompressedImageTest.copyHeader(compressedImageHDU.getHeader());
+            ReadWriteProvidedCompressedImageTest.adjustHeader(header);
+            ReadWriteProvidedCompressedImageTest.addCutoutFromCompressed(compressedImageHDU, header, fitsOutput,
+                    corners, lengths);
 
             fitsOutput.write(fitsOutputStream);
         }
 
         try {
-            assertWrittenCutoutMatches(tempFile, 0, expectedCutout9, lengths9);
+            assertWrittenCutoutMatches(tempFile, 0, expectedCutout, lengths);
         } finally {
             tempFile.delete();
         }
@@ -1202,12 +1204,55 @@ public class ReadWriteProvidedCompressedImageTest {
             Assertions.assertArrayEquals(expectedAxes,
                     ArrayFuncs.getDimensions(imageHdu.getData().getData()),
                     "Java array dimensions at HDU " + hduIndex);
+            final Class<?> arrayType = ArrayFuncs.getBaseClass(imageHdu.getData().getData());
+            final ByteBuffer expectedPixels = java.nio.ByteBuffer.wrap(expected);
+            ReadWriteProvidedCompressedImageTest.writeExpectedCutoutBytes(expectedPixels, imageHdu, lengths, hduIndex,
+                    arrayType);
+        }
+    }
+
+    private static void writeExpectedCutoutBytes(final ByteBuffer expectedPixels, final ImageHDU imageHdu,
+                                                 final int[] lengths, final int hduIndex, final Class<?> arrayType) {
+        if (arrayType == short.class) {
+            final ShortBuffer expectedShortPixels = expectedPixels.asShortBuffer();
             final short[][] data = (short[][]) imageHdu.getData().getData();
-            final ShortBuffer expectedPixels = java.nio.ByteBuffer.wrap(expected).asShortBuffer();
             int index = 0;
             for (int axis2 = 0; axis2 < lengths[0]; axis2++) {
                 for (int axis1 = 0; axis1 < lengths[1]; axis1++) {
-                    Assertions.assertEquals(expectedPixels.get(index), data[axis2][axis1],
+                    Assertions.assertEquals(expectedShortPixels.get(index), data[axis2][axis1],
+                            "pixel differed at cutout index " + index + " in HDU " + hduIndex);
+                    index++;
+                }
+            }
+        } else if (arrayType == float.class) {
+            final FloatBuffer expectedFloatPixels = expectedPixels.asFloatBuffer();
+            final float[][] data = (float[][]) imageHdu.getData().getData();
+            int index = 0;
+            for (int axis2 = 0; axis2 < lengths[0]; axis2++) {
+                for (int axis1 = 0; axis1 < lengths[1]; axis1++) {
+                    Assertions.assertEquals(expectedFloatPixels.get(index), data[axis2][axis1],
+                            "pixel differed at cutout index " + index + " in HDU " + hduIndex);
+                    index++;
+                }
+            }
+        } else if (arrayType == double.class) {
+            final DoubleBuffer expectedDoublePixels = expectedPixels.asDoubleBuffer();
+            final double[][] data = (double[][]) imageHdu.getData().getData();
+            int index = 0;
+            for (int axis2 = 0; axis2 < lengths[0]; axis2++) {
+                for (int axis1 = 0; axis1 < lengths[1]; axis1++) {
+                    Assertions.assertEquals(expectedDoublePixels.get(index), data[axis2][axis1],
+                            "pixel differed at cutout index " + index + " in HDU " + hduIndex);
+                    index++;
+                }
+            }
+        }  else if (arrayType == int.class) {
+            final IntBuffer expectedIntPixels = expectedPixels.asIntBuffer();
+            final int[][] data = (int[][]) imageHdu.getData().getData();
+            int index = 0;
+            for (int axis2 = 0; axis2 < lengths[0]; axis2++) {
+                for (int axis1 = 0; axis1 < lengths[1]; axis1++) {
+                    Assertions.assertEquals(expectedIntPixels.get(index), data[axis2][axis1],
                             "pixel differed at cutout index " + index + " in HDU " + hduIndex);
                     index++;
                 }
@@ -1245,19 +1290,13 @@ public class ReadWriteProvidedCompressedImageTest {
         }
     }
 
-    static void adjustMEFHeader(final Header header, final boolean firstHDUAlreadyWritten,
-                                final int nextEndSize) {
+    static void adjustHeader(final Header header) {
         header.deleteKey(Standard.SIMPLE);
         header.deleteKey(Standard.XTENSION);
         header.deleteKey(Standard.EXTEND);
         header.deleteKey(Standard.TFIELDS);
 
-        if (firstHDUAlreadyWritten) {
-            header.addValue(Standard.XTENSION, Standard.XTENSION_IMAGE);
-        } else {
-            header.addValue(Standard.SIMPLE, Boolean.TRUE);
-            ReadWriteProvidedCompressedImageTest.setupPrimaryHeader(header, nextEndSize);
-        }
+        header.addValue(Standard.XTENSION, Standard.XTENSION_IMAGE);
 
         // Values set as per FITS standard for IMAGE and SIMPLE extensions.
         header.addValue(Standard.PCOUNT, 0);
