@@ -79,6 +79,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -127,6 +128,7 @@ import nom.tam.fits.compression.algorithm.api.ICompressorControl;
 import nom.tam.fits.compression.algorithm.hcompress.HCompressorOption;
 import nom.tam.fits.compression.algorithm.quant.QuantizeOption;
 import nom.tam.fits.compression.algorithm.rice.RiceCompressOption;
+import nom.tam.fits.compression.provider.param.api.ICompressParameters;
 import nom.tam.fits.compression.provider.param.rice.RiceCompressParameters;
 import nom.tam.fits.header.Compression;
 import nom.tam.fits.header.Standard;
@@ -323,15 +325,264 @@ public class CompressedImageTilerTest {
 
             testSubject.initCompressionOption(option);
             Assertions.assertEquals(32, option.getBlockSize());
+            Assertions.assertEquals(RiceCompressOption.DEFAULT_RICE_BYTEPIX, option.getBytePix());
 
             testSubject.initCompressionOption(quantizeOption);
             Assertions.assertEquals(quantizeOption.getBScale(), Double.NaN, 0.0D);
             Assertions.assertEquals(quantizeOption.getBZero(), Double.NaN, 0.0D);
 
+            final AtomicBoolean headerParametersLoaded = new AtomicBoolean(false);
+            final RiceCompressOption trackingOption = new RiceCompressOption() {
+                @Override
+                public RiceCompressParameters getCompressionParameters() {
+                    return new RiceCompressParameters(this) {
+                        @Override
+                        public void getValuesFromHeader(final Header header) throws nom.tam.fits.HeaderCardException {
+                            headerParametersLoaded.set(true);
+                            super.getValuesFromHeader(header);
+                        }
+                    };
+                }
+            };
+            testSubject.initCompressionOption(trackingOption);
+            Assertions.assertTrue(headerParametersLoaded.get(), "getValuesFromHeader should load Rice parameters");
+
+            final ICompressOption noParametersOption = createOptionWithoutParameters();
+            testSubject.initCompressionOption(noParametersOption);
+            Assertions.assertEquals(cfitsioTable.getHeader().getIntValue(Compression.ZTILEn.n(2), 1),
+                    noParametersOption.getTileHeight());
+
             // Should be ignored.
             final HCompressorOption ignoredOption = new HCompressorOption();
             testSubject.initCompressionOption(ignoredOption);
             Assertions.assertEquals(1, ignoredOption.getTileHeight());
+        }
+    }
+
+    private static ICompressOption createOptionWithoutParameters() {
+        return new ICompressOption() {
+            private int tileHeight;
+            private int tileWidth;
+
+            @Override
+            public ICompressOption copy() {
+                return this;
+            }
+
+            @Override
+            public ICompressParameters getCompressionParameters() {
+                return null;
+            }
+
+            @Override
+            public boolean isLossyCompression() {
+                return false;
+            }
+
+            @Override
+            public void setParameters(final ICompressParameters parameters) {
+            }
+
+            @Override
+            public ICompressOption setTileHeight(final int value) {
+                tileHeight = value;
+                return this;
+            }
+
+            @Override
+            public ICompressOption setTileWidth(final int value) {
+                tileWidth = value;
+                return this;
+            }
+
+            @Override
+            public int getTileHeight() {
+                return tileHeight;
+            }
+
+            @Override
+            public int getTileWidth() {
+                return tileWidth;
+            }
+
+            @Override
+            public <T> T unwrap(final Class<T> clazz) {
+                return null;
+            }
+        };
+    }
+
+    @Test
+    public void doTestInitIgnoresMissingColumnType() throws Exception {
+        final File sourceFile = new File("src/test/resources/nom/tam/image/provided/m13_rice.fits");
+        try (final Fits sourceFits = new Fits(sourceFile, true)) {
+            final CompressedImageHDU compressedImageHDU = (CompressedImageHDU) sourceFits.getHDU(1);
+            compressedImageHDU.getHeader().deleteKey(Standard.TTYPEn.n(1));
+            final CompressedImageTiler testSubject = new CompressedImageTiler(compressedImageHDU);
+            Assertions.assertNotNull(testSubject);
+        }
+    }
+
+    @Test
+    public void doTestIncrementPositionMultiDimensional() {
+        final int[] start = new int[] {0, 0, 0};
+        final int[] current = new int[] {0, 0, 0};
+        final int[] lengths = new int[] {2, 2, 2};
+        final int[] steps = new int[] {1, 1, 1};
+
+        Assertions.assertTrue(CompressedImageTiler.incrementPosition(start, current, lengths, steps));
+        Assertions.assertArrayEquals(new int[] {0, 1, 0}, current);
+
+        Assertions.assertTrue(CompressedImageTiler.incrementPosition(start, current, lengths, steps));
+        Assertions.assertArrayEquals(new int[] {1, 0, 0}, current);
+    }
+
+    @Test
+    public void doTestGetTileOffsetsForRowWiseTiling() {
+        final CompressedImageTiler testSubject = new CompressedImageTiler(null) {
+            @Override
+            void init() {
+            }
+
+            @Override
+            int getNumberOfDimensions() {
+                return 2;
+            }
+        };
+
+        final int[] offsets = testSubject.getTileOffsets(new int[] {1115, 523}, new int[] {1, 2112});
+        Assertions.assertEquals(0, offsets[0], "row-wise tile offset along axis 2");
+        Assertions.assertEquals(523, offsets[1]);
+    }
+
+    @Test
+    public void doTestGetTileRejectsNegativeLength() throws Exception {
+        final CompressedImageTiler testSubject = new CompressedImageTiler(null) {
+            @Override
+            void init() {
+            }
+
+            @Override
+            int[] getImageDimensions() {
+                return new int[] {100, 100};
+            }
+        };
+
+        try (final ArrayDataOutput output = new FitsOutputStream(new ByteArrayOutputStream())) {
+            Assertions.assertThrows(IOException.class,
+                    () -> testSubject.getTile(output, new int[] {0, 0}, new int[] {10, -1}, new int[] {1, 1}));
+        }
+    }
+
+    @Test
+    public void doTestGetTileOffsetsOnTileBoundary() {
+        final CompressedImageTiler testSubject = new CompressedImageTiler(null) {
+            @Override
+            void init() {
+            }
+
+            @Override
+            int getNumberOfDimensions() {
+                return 2;
+            }
+        };
+
+        Assertions.assertArrayEquals(new int[] {0, 0},
+                testSubject.getTileOffsets(new int[] {100, 200}, new int[] {100, 100}));
+    }
+
+    @Test
+    public void doTestGetTileSkipsInvalidSegment() throws Exception {
+        final CompressedImageTiler testSubject = new CompressedImageTiler(null) {
+            @Override
+            void init() {
+            }
+
+            @Override
+            int getZBitPix() {
+                return 16;
+            }
+
+            @Override
+            int[] getTileDimensions() {
+                return new int[] {10, 10};
+            }
+
+            @Override
+            int getNumberOfDimensions() {
+                return 2;
+            }
+
+            @Override
+            Object getDecompressedTileData(final int[] positions, final int[] tileDimensions) {
+                return new short[10][10];
+            }
+        };
+
+        final ByteArrayOutputStream outputByteStream = new ByteArrayOutputStream();
+        try (final ArrayDataOutput output = new FitsOutputStream(outputByteStream)) {
+            testSubject.getTile(output, new int[] {10, 10}, new int[] {0, 10}, new int[] {2, 2}, new int[] {1, 1});
+        }
+
+        Assertions.assertEquals(0, outputByteStream.size());
+    }
+
+    @Test
+    public void doTestGetTileAppliesStepOffsetAcrossTiles() throws Exception {
+        final CompressedImageTiler testSubject = new CompressedImageTiler(null) {
+            @Override
+            void init() {
+            }
+
+            @Override
+            int getZBitPix() {
+                return 16;
+            }
+
+            @Override
+            int[] getTileDimensions() {
+                return new int[] {10, 10};
+            }
+
+            @Override
+            int getNumberOfDimensions() {
+                return 2;
+            }
+
+            @Override
+            int[] getImageDimensions() {
+                return new int[] {100, 100};
+            }
+
+            @Override
+            Object getDecompressedTileData(final int[] positions, final int[] tileDimensions) {
+                return new short[10][10];
+            }
+        };
+        final ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+
+        try (final ArrayDataOutput arrayDataOutput = new FitsOutputStream(byteArrayOutputStream)) {
+            testSubject.getTile(arrayDataOutput, new int[] {0, 0}, new int[] {1, 13}, new int[] {1, 3});
+            arrayDataOutput.flush();
+        }
+
+        Assertions.assertEquals(5 * ElementType.SHORT.size(), byteArrayOutputStream.size());
+    }
+
+    @Test
+    public void doTestDecompressIntoBufferLoadsRiceParametersFromHeader() throws Exception {
+        final File sourceFile = new File("src/test/resources/nom/tam/image/provided/m13_rice.fits");
+        try (final Fits sourceFits = new Fits(sourceFile, true)) {
+            final CompressedImageHDU compressedImageHDU = (CompressedImageHDU) sourceFits.getHDU(1);
+            final CompressedImageTiler testSubject = new CompressedImageTiler(compressedImageHDU);
+            final ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+
+            try (final ArrayDataOutput arrayDataOutput = new FitsOutputStream(byteArrayOutputStream)) {
+                testSubject.getTile(arrayDataOutput, new int[] {0, 0}, new int[] {5, 5});
+                arrayDataOutput.flush();
+            }
+
+            Assertions.assertEquals(5 * 5 * ElementType.SHORT.size(), byteArrayOutputStream.size());
         }
     }
 
