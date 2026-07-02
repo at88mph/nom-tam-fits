@@ -321,16 +321,16 @@ public class CompressedImageTilerTest {
                 }
             };
 
-            testSubject.initCompressionOption(option, 8);
+            testSubject.initCompressionOption(option);
             Assertions.assertEquals(32, option.getBlockSize());
 
-            testSubject.initCompressionOption(quantizeOption, 8);
+            testSubject.initCompressionOption(quantizeOption);
             Assertions.assertEquals(quantizeOption.getBScale(), Double.NaN, 0.0D);
             Assertions.assertEquals(quantizeOption.getBZero(), Double.NaN, 0.0D);
 
             // Should be ignored.
             final HCompressorOption ignoredOption = new HCompressorOption();
-            testSubject.initCompressionOption(ignoredOption, 8);
+            testSubject.initCompressionOption(ignoredOption);
             Assertions.assertEquals(1, ignoredOption.getTileHeight());
         }
     }
@@ -627,6 +627,82 @@ public class CompressedImageTilerTest {
 
         // Start at 21, 21 and get offsets for tiles of size 5x5.
         Assertions.assertArrayEquals(new int[] {4, 4}, testSubject.getTileOffsets(new int[] {19, 4}, new int[] {5, 5}));
+    }
+
+    @Test
+    public void doTestGetTileIndexesAndRowNumber() throws Exception {
+        final CompressedImageTiler testSubject = new CompressedImageTiler(null) {
+            @Override
+            void init() {
+            }
+
+            @Override
+            int getNumberOfDimensions() {
+                return 2;
+            }
+
+            @Override
+            int[] getTableDimensions() {
+                return new int[] {5, 5};
+            }
+        };
+
+        // Image positions are [axis2, axis1]; tile dimensions are [ZTILE2, ZTILE1].
+        Assertions.assertArrayEquals(new int[] {2, 1},
+                testSubject.getTileIndexes(new int[] {150, 250}, new int[] {100, 100}));
+        Assertions.assertEquals(7, testSubject.getRowNumber(new int[] {2, 1}));
+
+        // Row-wise tiling (ZTILE2 = 1): table row tracks the image row (axis 2).
+        Assertions.assertArrayEquals(new int[] {0, 1115},
+                testSubject.getTileIndexes(new int[] {1115, 0}, new int[] {1, 2112}));
+
+        final CompressedImageTiler rowWiseTiler = new CompressedImageTiler(null) {
+            @Override
+            void init() {
+            }
+
+            @Override
+            int getNumberOfDimensions() {
+                return 2;
+            }
+
+            @Override
+            int[] getTableDimensions() {
+                return new int[] {1, 4644};
+            }
+        };
+        Assertions.assertEquals(1115, rowWiseTiler.getRowNumber(new int[] {0, 1115}));
+    }
+
+    @Test
+    public void doTestCutoutPixelValuesAsymmetricCorner() throws Exception {
+        final File sourceFile = new File("src/test/resources/nom/tam/image/provided/m13_rice.fits");
+
+        try (final Fits sourceFits = new Fits(sourceFile, true)) {
+            final CompressedImageHDU compressedImageHDU = (CompressedImageHDU) sourceFits.getHDU(1);
+            final short[][] full = (short[][]) compressedImageHDU.asImageHDU().getData().getData();
+            final CompressedImageTiler testSubject = new CompressedImageTiler(compressedImageHDU);
+
+            final int[] corners = new int[] {10, 15};
+            final int[] lengths = new int[] {5, 7};
+            final ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+
+            try (final ArrayDataOutput arrayDataOutput = new FitsOutputStream(byteArrayOutputStream)) {
+                testSubject.getTile(arrayDataOutput, corners, lengths);
+                arrayDataOutput.flush();
+            }
+
+            final short[] cutout = new short[lengths[0] * lengths[1]];
+            java.nio.ByteBuffer.wrap(byteArrayOutputStream.toByteArray()).asShortBuffer().get(cutout);
+
+            int index = 0;
+            for (int axis0 = 0; axis0 < lengths[0]; axis0++) {
+                for (int axis1 = 0; axis1 < lengths[1]; axis1++) {
+                    Assertions.assertEquals(full[corners[0] + axis0][corners[1] + axis1], cutout[index++],
+                            "pixel differed at cutout index " + (index - 1));
+                }
+            }
+        }
     }
 
     @Test
