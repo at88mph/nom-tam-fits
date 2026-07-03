@@ -44,8 +44,8 @@ import nom.tam.fits.Header;
 import nom.tam.fits.compression.algorithm.api.ICompressOption;
 import nom.tam.fits.compression.algorithm.api.ICompressorControl;
 import nom.tam.fits.compression.algorithm.quant.QuantizeOption;
-import nom.tam.fits.compression.algorithm.rice.RiceCompressOption;
 import nom.tam.fits.compression.provider.CompressorProvider;
+import nom.tam.fits.compression.provider.param.api.ICompressParameters;
 import nom.tam.fits.header.Compression;
 import nom.tam.fits.header.Standard;
 import nom.tam.image.ImageTiler;
@@ -244,10 +244,13 @@ public class CompressedImageTiler implements ImageTiler {
     }
 
     int[] getTileIndexes(final int[] pixelPositions, final int[] tileDimensions) {
-        final int[] tileIndexes = new int[pixelPositions.length];
+        final int n = pixelPositions.length;
+        final int[] tileIndexes = new int[n];
 
-        for (int i = 0; i < pixelPositions.length; i++) {
-            tileIndexes[i] = pixelPositions[i] / tileDimensions[i];
+        for (int i = 0; i < n; i++) {
+            // Positions and tile dimensions are in image index order (ZNAXISn reversed). Table rows use FITS axis
+            // order (NAXIS1 varies fastest), so map each image axis to the corresponding FITS axis index.
+            tileIndexes[n - 1 - i] = pixelPositions[i] / tileDimensions[i];
         }
 
         return tileIndexes;
@@ -293,12 +296,12 @@ public class CompressedImageTiler implements ImageTiler {
      *
      * @return            Buffer instance. Never null.
      */
-    Buffer decompressIntoBuffer(final Object[] row, final ByteBuffer compressed) {
+    Buffer decompressIntoBuffer(final Object[] row, final ByteBuffer compressed) throws FitsException {
         final ElementType<Buffer> bufferElementType = getBaseType();
         final Buffer tileBuffer = bufferElementType.newBuffer(getTileSize());
         tileBuffer.rewind();
         final ICompressorControl compressorControl = getCompressorControl(getBaseType());
-        final ICompressOption option = initCompressionOption(compressorControl.option(), bufferElementType.size());
+        final ICompressOption option = initCompressionOption(compressorControl.option());
         initRowOption(option, row);
         compressorControl.decompress(compressed, tileBuffer, option);
 
@@ -311,12 +314,10 @@ public class CompressedImageTiler implements ImageTiler {
                 elementType.primitiveClass());
     }
 
-    ICompressOption initCompressionOption(final ICompressOption option, final int bytePix) {
-        if (option instanceof RiceCompressOption) {
-            ((RiceCompressOption) option).setBlockSize(getBlockSize());
-            ((RiceCompressOption) option).setBytePix(bytePix);
-        } else if (option instanceof QuantizeOption) {
-            initCompressionOption(((QuantizeOption) option).getCompressOption(), bytePix);
+    ICompressOption initCompressionOption(final ICompressOption option) throws FitsException {
+        final ICompressParameters parameters = option.getCompressionParameters();
+        if (parameters != null) {
+            parameters.getValuesFromHeader(getHeader());
         }
 
         option.setTileHeight(getTileHeight()).setTileWidth(getTileWidth());
@@ -355,8 +356,7 @@ public class CompressedImageTiler implements ImageTiler {
      * @throws FitsException  If the row doesn't exist, or cannot be read.
      */
     Object[] getRow(final int[] positions, final int[] tileDimensions) throws FitsException {
-        final int[] tileIndexes = getTileIndexes(ArrayFuncs.reverseIndices(positions),
-                ArrayFuncs.reverseIndices(tileDimensions));
+        final int[] tileIndexes = getTileIndexes(positions, tileDimensions);
         final int rowNumber = getRowNumber(tileIndexes);
         return compressedImageHDU.getRow(rowNumber);
     }
